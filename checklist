@@ -1,0 +1,876 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { initializeApp } from 'firebase/app';
+import { 
+  getAuth, 
+  signInAnonymously, 
+  signInWithCustomToken, 
+  onAuthStateChanged 
+} from 'firebase/auth';
+import { 
+  getFirestore, 
+  doc, 
+  setDoc, 
+  collection,
+  onSnapshot 
+} from 'firebase/firestore';
+import { ChevronLeft, ChevronRight, Square, CheckSquare, PlusSquare, BarChart3, Star, Download, Settings, X, Trash2, ArrowUp, ArrowDown } from 'lucide-react';
+
+// --- Konfiguracja i Inicjalizacja Firebase ---
+const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+
+// Zaktualizowana lista nawyków (Domyślna)
+const HABITS_LIST = [
+  'Trening',
+  'Medytacja 15 min x2',
+  'Witamina D3 + K2',
+  'Kreatyna',
+  'Jedna niewygodna czynność',
+  '4H głębokiej pracy',
+  'Bez słodyczy',
+  'Bez porno'
+];
+
+// Domyślny stan dla nowego dnia (Dynamiczny stan nawyków będzie nadpisywał bazę)
+const DEFAULT_ENTRY = {
+  habits: {}, // Nawyki będą teraz dynamicznie odczytywane
+  tasks: [{ text: '', completed: false }, { text: '', completed: false }, { text: '', completed: false }],
+  gratitude: ['', '', ''],
+  learning: ['', '', ''],
+  sleepDuration: '',
+  sleepQuality: null, // 1-5
+  mood: null // 1-5
+};
+
+// --- Komponent Auto-rozszerzającego się Textarea ---
+function AutoTextArea({ value, onChange, onBlur, placeholder, isCompleted }) {
+  const textareaRef = useRef(null);
+
+  useEffect(() => {
+    if (textareaRef.current) {
+      textareaRef.current.style.height = '40px'; 
+      textareaRef.current.style.height = `${textareaRef.current.scrollHeight}px`;
+    }
+  }, [value]);
+
+  return (
+    <textarea
+      ref={textareaRef}
+      value={value}
+      onChange={onChange}
+      onBlur={onBlur}
+      placeholder={placeholder}
+      spellCheck="false"
+      rows={1}
+      className={`flex-1 bg-transparent border-none outline-none focus:ring-0 px-1 placeholder-slate-300 font-semibold text-2xl resize-none overflow-hidden block w-full transition-all duration-300 ${isCompleted ? 'opacity-60 line-through decoration-slate-400 decoration-2 text-slate-500' : 'text-slate-800'}`}
+      style={{ lineHeight: '40px', minHeight: '40px', paddingTop: '0', paddingBottom: '0' }}
+    />
+  );
+}
+
+export default function App() {
+  const [user, setUser] = useState(null);
+  const [currentDate, setCurrentDate] = useState(new Date());
+  
+  // Przechowujemy wszystkie wpisy w pamięci, co jest potrzebne do renderowania wykresu
+  const [allEntries, setAllEntries] = useState({});
+  const [isLoading, setIsLoading] = useState(true);
+
+  // --- Dynamiczne Nawyki i Edycja Zadań (Ustawienia) ---
+  const [userHabits, setUserHabits] = useState(HABITS_LIST);
+  const [showSettings, setShowSettings] = useState(false);
+  const [editingHabits, setEditingHabits] = useState([]); // Tymczasowy stan podczas edycji nawyków
+  const [editingTasks, setEditingTasks] = useState([]);   // Tymczasowy stan podczas edycji zadań
+
+  const dateId = formatDateForDB(currentDate);
+  const entry = allEntries[dateId] || DEFAULT_ENTRY;
+
+  // --- Autoryzacja Firebase (Reguła 3) ---
+  useEffect(() => {
+    const initAuth = async () => {
+      try {
+        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+          await signInWithCustomToken(auth, __initial_auth_token);
+        } else {
+          await signInAnonymously(auth);
+        }
+      } catch (error) {
+        console.error("Błąd autoryzacji:", error);
+      }
+    };
+
+    initAuth();
+    const unsubscribe = onAuthStateChanged(auth, setUser);
+    return () => unsubscribe();
+  }, []);
+
+  // --- Pobieranie Ustawień Nawyków ---
+  useEffect(() => {
+    if (!user) return;
+    
+    const settingsRef = doc(db, 'artifacts', appId, 'users', user.uid, 'settings', 'preferences');
+    const unsubscribe = onSnapshot(settingsRef, (docSnap) => {
+      if (docSnap.exists() && docSnap.data().habits) {
+        setUserHabits(docSnap.data().habits);
+      } else {
+        setUserHabits(HABITS_LIST); // Fallback do domyślnych, jeśli brak ustawień
+      }
+    });
+
+    return () => unsubscribe();
+  }, [user]);
+
+  // --- Pobieranie wszystkich Danych z kolekcji (Reguła 1 & 2) ---
+  useEffect(() => {
+    if (!user) return;
+    setIsLoading(true);
+
+    const collectionRef = collection(db, 'artifacts', appId, 'users', user.uid, 'daily_journal');
+    
+    const unsubscribe = onSnapshot(collectionRef, 
+      (snapshot) => {
+        const entriesObj = {};
+        snapshot.forEach(doc => {
+          entriesObj[doc.id] = { ...DEFAULT_ENTRY, ...doc.data() };
+        });
+        setAllEntries(entriesObj);
+        setIsLoading(false);
+      }, 
+      (error) => {
+        console.error("Błąd pobierania danych:", error);
+        setIsLoading(false);
+      }
+    );
+
+    return () => unsubscribe();
+  }, [user]);
+
+  // --- Pomocnicze funkcje ---
+  function formatDateForDB(date) {
+    const d = new Date(date);
+    d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
+    return d.toISOString().split('T')[0];
+  }
+
+  function formatDisplayDate(date) {
+    const d = date.getDate().toString().padStart(2, '0');
+    const m = (date.getMonth() + 1).toString().padStart(2, '0');
+    const y = date.getFullYear().toString().slice(-2);
+    return `${d}/${m}/${y}`;
+  }
+
+  const changeDate = (days) => {
+    const newDate = new Date(currentDate);
+    newDate.setDate(newDate.getDate() + days);
+    setCurrentDate(newDate);
+  };
+
+  // Funkcja wyliczająca dane do wykresu z ostatnich 7 dni względem wybranej daty
+  const getChartData = () => {
+    const data = [];
+    const daysNames = ['Nd', 'Pn', 'Wt', 'Śr', 'Cz', 'Pt', 'Sb'];
+    
+    for (let i = 6; i >= 0; i--) {
+      const d = new Date(currentDate);
+      d.setDate(d.getDate() - i);
+      const id = formatDateForDB(d);
+      
+      const dayEntry = allEntries[id] || DEFAULT_ENTRY;
+      
+      let completedCount = 0;
+      userHabits.forEach(h => {
+        if (dayEntry.habits && dayEntry.habits[h]) completedCount++;
+      });
+      
+      const percentage = userHabits.length > 0 ? (completedCount / userHabits.length) * 100 : 0;
+      
+      data.push({
+        dayName: daysNames[d.getDay()],
+        completedCount,
+        percentage,
+        isToday: i === 0
+      });
+    }
+    return data;
+  };
+
+  // --- Zapisywanie danych do Firestore ---
+  const saveToDB = async (newData) => {
+    if (!user) return;
+    const docRef = doc(db, 'artifacts', appId, 'users', user.uid, 'daily_journal', dateId);
+    
+    // Optymistyczna aktualizacja w pamięci
+    setAllEntries(prev => ({
+      ...prev,
+      [dateId]: { ...entry, ...newData }
+    }));
+
+    try {
+      await setDoc(docRef, newData, { merge: true });
+    } catch (error) {
+      console.error("Błąd zapisu:", error);
+    }
+  };
+
+  // --- Handlery akcji ---
+  const toggleHabit = async (habitKey) => {
+    const currentVal = entry.habits[habitKey] || false;
+    const newHabits = { ...entry.habits, [habitKey]: !currentVal };
+    await saveToDB({ habits: newHabits });
+  };
+
+  const handleSimpleChange = async (field, value) => {
+    // Natychmiastowa aktualizacja lokalnego stanu
+    setAllEntries(prev => ({
+      ...prev,
+      [dateId]: { ...entry, [field]: value }
+    }));
+    // Wywołanie zapisu w tle
+    await saveToDB({ [field]: value });
+  };
+
+  const handleTextChange = (section, index, value) => {
+    const newList = [...entry[section]];
+    newList[index] = value;
+    setAllEntries(prev => ({
+      ...prev,
+      [dateId]: { ...entry, [section]: newList }
+    }));
+  };
+
+  const handleTextBlur = async (section) => {
+    await saveToDB({ [section]: entry[section] });
+  };
+
+  const addLine = async (section) => {
+    const newList = [...entry[section], ''];
+    await saveToDB({ [section]: newList });
+  };
+
+  const handleTaskTextChange = (index, value) => {
+    const newTasks = [...(entry.tasks || [])];
+    if (!newTasks[index]) newTasks[index] = { text: '', completed: false };
+    newTasks[index].text = value;
+    setAllEntries(prev => ({
+      ...prev,
+      [dateId]: { ...entry, tasks: newTasks }
+    }));
+  };
+
+  const handleTaskToggle = async (index) => {
+    const newTasks = [...(entry.tasks || [])];
+    if (!newTasks[index]) return;
+    newTasks[index].completed = !newTasks[index].completed;
+    
+    setAllEntries(prev => ({
+      ...prev,
+      [dateId]: { ...entry, tasks: newTasks }
+    }));
+    await saveToDB({ tasks: newTasks });
+  };
+
+  const handleTaskBlur = async () => {
+    await saveToDB({ tasks: entry.tasks || [] });
+  };
+
+  const addTaskLine = async () => {
+    const newTasks = [...(entry.tasks || []), { text: '', completed: false }];
+    setAllEntries(prev => ({
+      ...prev,
+      [dateId]: { ...entry, tasks: newTasks }
+    }));
+    await saveToDB({ tasks: newTasks });
+  };
+
+  // Lista emotikonów do nastroju
+  const MOOD_EMOJIS = ['😫', '😕', '😐', '🙂', '🤩'];
+
+  // --- Funkcje Ustawień i Edycji ---
+  const openSettings = () => {
+    setEditingHabits([...userHabits]);
+    setEditingTasks([...(entry.tasks || [])]);
+    setShowSettings(true);
+  };
+
+  // Nawyki
+  const handleEditHabitChange = (index, value) => {
+    const newHabits = [...editingHabits];
+    newHabits[index] = value;
+    setEditingHabits(newHabits);
+  };
+
+  const handleRemoveHabit = (index) => {
+    const newHabits = [...editingHabits];
+    newHabits.splice(index, 1);
+    setEditingHabits(newHabits);
+  };
+
+  const handleAddHabit = () => {
+    setEditingHabits([...editingHabits, 'Nowy nawyk']);
+  };
+
+  const handleMoveHabit = (index, direction) => {
+    const newHabits = [...editingHabits];
+    if (direction === 'up' && index > 0) {
+      [newHabits[index - 1], newHabits[index]] = [newHabits[index], newHabits[index - 1]];
+    } else if (direction === 'down' && index < newHabits.length - 1) {
+      [newHabits[index + 1], newHabits[index]] = [newHabits[index], newHabits[index + 1]];
+    }
+    setEditingHabits(newHabits);
+  };
+
+  // Zadania
+  const handleEditTaskChangeInSettings = (index, value) => {
+    const newTasks = [...editingTasks];
+    newTasks[index].text = value;
+    setEditingTasks(newTasks);
+  };
+
+  const handleRemoveTaskInSettings = (index) => {
+    const newTasks = [...editingTasks];
+    newTasks.splice(index, 1);
+    setEditingTasks(newTasks);
+  };
+
+  const handleAddTaskInSettings = () => {
+    setEditingTasks([...editingTasks, { text: 'Nowe zadanie', completed: false }]);
+  };
+
+  const handleMoveTask = (index, direction) => {
+    const newTasks = [...editingTasks];
+    if (direction === 'up' && index > 0) {
+      [newTasks[index - 1], newTasks[index]] = [newTasks[index], newTasks[index - 1]];
+    } else if (direction === 'down' && index < newTasks.length - 1) {
+      [newTasks[index + 1], newTasks[index]] = [newTasks[index], newTasks[index + 1]];
+    }
+    setEditingTasks(newTasks);
+  };
+
+  // Zapis ustawień
+  const saveSettings = async () => {
+    if (!user) return;
+    // Oczyszczamy z pustych wpisów
+    const cleanedHabits = editingHabits.filter(h => h.trim() !== '');
+    const cleanedTasks = editingTasks.filter(t => t.text.trim() !== '');
+    
+    try {
+      // 1. Zapis globalnych nawyków
+      const settingsRef = doc(db, 'artifacts', appId, 'users', user.uid, 'settings', 'preferences');
+      await setDoc(settingsRef, { habits: cleanedHabits }, { merge: true });
+      
+      // 2. Zapis dzisiejszych zadań do logu dziennego
+      const docRef = doc(db, 'artifacts', appId, 'users', user.uid, 'daily_journal', dateId);
+      setAllEntries(prev => ({
+        ...prev,
+        [dateId]: { ...entry, tasks: cleanedTasks }
+      }));
+      await setDoc(docRef, { tasks: cleanedTasks }, { merge: true });
+
+      setShowSettings(false);
+    } catch (error) {
+      console.error("Błąd zapisu ustawień:", error);
+    }
+  };
+
+  // --- Eksport do CSV ---
+  const exportToCSV = () => {
+    if (!allEntries || Object.keys(allEntries).length === 0) return;
+
+    const habitHeaders = userHabits.map(h => `Nawyk: ${h}`);
+    const headers = [
+      "Data",
+      "Ilość snu (h)",
+      "Jakość snu (1-5)",
+      "Nastrój (1-5)",
+      ...habitHeaders,
+      "Zadania",
+      "Wdzięczność",
+      "Nauka Życia"
+    ];
+
+    const escapeCSV = (str) => {
+      if (str === null || str === undefined) return '""';
+      const stringified = String(str);
+      // Ucieczka dla znaków specjalnych w CSV (przecinki, cudzysłowy, nowe linie)
+      if (stringified.includes(',') || stringified.includes('"') || stringified.includes('\n')) {
+        return `"${stringified.replace(/"/g, '""')}"`;
+      }
+      return stringified;
+    };
+
+    const rows = [];
+    const sortedDates = Object.keys(allEntries).sort(); // Sortujemy chronologicznie po dacie
+
+    sortedDates.forEach(date => {
+      const entryData = allEntries[date];
+      const row = [];
+      
+      row.push(date);
+      row.push(entryData.sleepDuration || "");
+      row.push(entryData.sleepQuality || "");
+      row.push(entryData.mood || "");
+
+      // Kolumny dla każdego z nawyków
+      userHabits.forEach(habit => {
+        row.push((entryData.habits && entryData.habits[habit]) ? "Tak" : "Nie");
+      });
+
+      // Złączenie zadań w jeden tekst z odpowiednimi znacznikami [x] / [ ]
+      const tasksStr = (entryData.tasks || [])
+        .filter(t => t.text.trim() !== "")
+        .map(t => `${t.completed ? '[x]' : '[ ]'} ${t.text}`)
+        .join(" | ");
+      row.push(escapeCSV(tasksStr));
+
+      // Złączenie punktów wdzięczności
+      const gratitudeStr = (entryData.gratitude || [])
+        .filter(g => g.trim() !== "")
+        .map((g, i) => `${i+1}. ${g}`)
+        .join(" | ");
+      row.push(escapeCSV(gratitudeStr));
+
+      // Złączenie punktów nauki życia
+      const learningStr = (entryData.learning || [])
+        .filter(l => l.trim() !== "")
+        .map((l, i) => `${i+1}. ${l}`)
+        .join(" | ");
+      row.push(escapeCSV(learningStr));
+
+      rows.push(row.join(","));
+    });
+
+    // \uFEFF to BOM - dzięki temu polskie znaki UTF-8 wczytują się poprawnie w Excelu
+    const csvContent = "\uFEFF" + [headers.map(escapeCSV).join(","), ...rows].join("\n");
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    
+    // Tworzenie ukrytego linku i wymuszenie pobierania
+    const link = document.createElement("a");
+    link.setAttribute("href", url);
+    link.setAttribute("download", "dziennik_nawykow.csv");
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  return (
+    <div className="min-h-screen bg-neutral-100 flex items-center justify-center p-4 font-sans selection:bg-yellow-200 py-10 flex-col">
+      <style>
+        {`
+          @import url('https://fonts.googleapis.com/css2?family=Caveat:wght@400;500;600;700&display=swap');
+          .handwritten {
+            font-family: 'Caveat', cursive;
+          }
+          .notebook-paper {
+            background-color: #fdfbf7;
+            background-image: repeating-linear-gradient(transparent, transparent 39px, #d1d5db 39px, #d1d5db 40px);
+            background-attachment: local;
+          }
+          .custom-line-height {
+            line-height: 40px;
+          }
+          ::-webkit-scrollbar { width: 8px; }
+          ::-webkit-scrollbar-track { background: transparent; }
+          ::-webkit-scrollbar-thumb { background: #d1d5db; border-radius: 4px; }
+          textarea {
+            -webkit-appearance: none;
+            -moz-appearance: none;
+            appearance: none;
+          }
+          /* Animacja dla emotikon */
+          .emoji-btn:active { transform: scale(0.9); }
+        `}
+      </style>
+
+      {/* Główny kontener notatnika */}
+      <div className="w-full max-w-lg bg-white shadow-2xl rounded-sm sm:rounded-md overflow-hidden relative notebook-paper custom-line-height text-2xl handwritten font-semibold text-slate-800 border border-gray-200 min-h-[85vh]">
+        
+        {/* Czerwona linia marginesu */}
+        <div className="absolute left-10 md:left-14 top-0 bottom-0 w-[2px] bg-red-400 opacity-60 pointer-events-none z-0"></div>
+
+        {/* Zawartość */}
+        <div className="relative z-10 pl-14 md:pl-20 pr-6 py-10 h-full flex flex-col">
+          
+          {/* Header - Nawigacja Dat */}
+          <div className="flex justify-between items-center mb-6 pt-2">
+            <button 
+              onClick={() => changeDate(-1)} 
+              className="flex items-center hover:text-blue-600 transition-colors focus:outline-none p-1"
+            >
+              <ChevronLeft size={34} strokeWidth={2.5} />
+            </button>
+            
+            <h1 className="text-3xl font-bold tracking-widest text-center flex-1">
+              {formatDisplayDate(currentDate)}
+            </h1>
+            
+            <button 
+              onClick={() => changeDate(1)} 
+              className="flex items-center hover:text-blue-600 transition-colors focus:outline-none p-1"
+            >
+              <ChevronRight size={34} strokeWidth={2.5} />
+            </button>
+          </div>
+
+          {isLoading && (
+            <div className="absolute inset-0 bg-[#fdfbf7]/60 backdrop-blur-[1px] z-50 flex items-center justify-center">
+              <span className="text-3xl animate-pulse text-gray-500">Przewracanie strony...</span>
+            </div>
+          )}
+
+          {/* Sekcja: ZADANIA */}
+          <div className="mb-6 flex flex-col overflow-hidden border-b-2 border-slate-300/30 pb-4 border-dotted mt-2">
+            <h2 className="uppercase tracking-widest text-2xl font-bold mb-1">ZADANIA:</h2>
+            <div className="flex flex-col">
+              {(entry.tasks || []).map((task, index) => (
+                <div key={`t-${index}`} className="flex items-start min-h-[40px]">
+                  <button 
+                    onClick={() => handleTaskToggle(index)}
+                    className="mr-2 pt-[8px] text-slate-700 hover:text-blue-600 transition-colors focus:outline-none flex-shrink-0"
+                  >
+                    {task.completed ? <CheckSquare size={24} strokeWidth={2.5} /> : <Square size={24} strokeWidth={2.5} />}
+                  </button>
+                  <AutoTextArea
+                    value={task.text}
+                    onChange={(e) => handleTaskTextChange(index, e.target.value)}
+                    onBlur={handleTaskBlur}
+                    placeholder="Wpisz zadanie..."
+                    isCompleted={task.completed}
+                  />
+                </div>
+              ))}
+              <div className="h-[40px] flex items-center mt-1">
+                <button 
+                  onClick={addTaskLine}
+                  className="flex items-center bg-transparent border-2 border-slate-700 px-2 rounded-sm hover:bg-slate-100 transition-colors focus:outline-none"
+                  style={{ lineHeight: '1.2' }}
+                >
+                  <PlusSquare size={20} strokeWidth={2.5} className="mr-2" />
+                  <span className="uppercase tracking-widest text-xl font-bold">DODAJ</span>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* Wykres - Ostatnie 7 dni */}
+          <div className="mb-2">
+             <div className="flex justify-between items-end h-[80px] px-2">
+               {getChartData().map((day, idx) => (
+                  <div key={idx} className="flex flex-col items-center justify-end h-full w-[12%] group relative">
+                     {/* Pasek wykresu */}
+                     <div 
+                        className={`w-full rounded-t-sm transition-all duration-500 ${day.isToday ? 'bg-blue-400' : 'bg-slate-400'} opacity-70`}
+                        style={{ height: `${Math.max(day.percentage, 5)}%`, minHeight: '4px' }}
+                     ></div>
+                     <span className={`text-sm mt-1 leading-none ${day.isToday ? 'font-bold text-blue-600' : 'text-slate-500'}`}>
+                        {day.dayName}
+                     </span>
+                     
+                     {/* Tooltip przy najechaniu */}
+                     <div className="absolute -top-8 bg-slate-800 text-white text-xs px-2 py-1 rounded opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-10 font-sans whitespace-nowrap">
+                        {day.completedCount}/{userHabits.length} nawyków
+                     </div>
+                  </div>
+               ))}
+             </div>
+          </div>
+
+          {/* Sekcja 0: Parametry fizjologiczne i Nastrój */}
+          <div className="mb-6 flex flex-col border-b-2 border-slate-300/30 pb-2 border-dotted">
+             <div className="flex items-center h-[40px]">
+                <span className="w-28 flex-shrink-0 text-slate-700">Ilość snu:</span>
+                <input
+                  type="text"
+                  value={entry.sleepDuration || ''}
+                  onChange={(e) => {
+                     setAllEntries(prev => ({...prev, [dateId]: {...entry, sleepDuration: e.target.value}}));
+                  }}
+                  onBlur={(e) => handleSimpleChange('sleepDuration', e.target.value)}
+                  className="w-16 bg-transparent outline-none border-b-2 border-slate-400/50 border-dotted text-center focus:border-blue-500 placeholder-slate-300 mx-1"
+                  placeholder="np. 7.5"
+                />
+                <span className="text-slate-700">h</span>
+             </div>
+             
+             <div className="flex items-center h-[40px]">
+                <span className="w-28 flex-shrink-0 text-slate-700">Jakość snu:</span>
+                <div className="flex space-x-1 items-center h-full">
+                   {[1, 2, 3, 4, 5].map(starValue => (
+                      <button 
+                        key={starValue} 
+                        onClick={() => handleSimpleChange('sleepQuality', starValue)} 
+                        className="focus:outline-none pt-1"
+                      >
+                         <Star 
+                           size={24} 
+                           className={`transition-colors duration-200 ${entry.sleepQuality >= starValue ? "fill-slate-700 text-slate-700" : "text-slate-300"}`} 
+                         />
+                      </button>
+                   ))}
+                </div>
+             </div>
+
+             <div className="flex items-center h-[40px]">
+                <span className="w-28 flex-shrink-0 text-slate-700">Nastrój:</span>
+                <div className="flex space-x-4 items-center h-full">
+                   {MOOD_EMOJIS.map((emoji, idx) => {
+                      const moodVal = idx + 1;
+                      const isSelected = entry.mood === moodVal;
+                      return (
+                         <button
+                            key={moodVal}
+                            onClick={() => handleSimpleChange('mood', moodVal)}
+                            className={`emoji-btn text-[1.4rem] transition-all duration-200 focus:outline-none font-sans pt-1 ${isSelected ? 'scale-125 opacity-100 drop-shadow-md' : 'opacity-40 hover:opacity-80 grayscale hover:grayscale-0'}`}
+                         >
+                            {emoji}
+                         </button>
+                      )
+                   })}
+                </div>
+             </div>
+          </div>
+
+          {/* Sekcja 1: Nawyki */}
+          <div className="mb-6 flex flex-col overflow-hidden">
+            <h2 className="uppercase tracking-widest text-2xl font-bold mb-1">NAWYKI:</h2>
+            {userHabits.map((habit) => (
+              <label key={habit} className="flex items-center cursor-pointer group mb-0 h-[40px] w-full overflow-hidden">
+                <button 
+                  onClick={() => toggleHabit(habit)}
+                  className="mr-3 text-slate-700 group-hover:text-blue-600 transition-colors focus:outline-none flex-shrink-0"
+                >
+                  {entry.habits && entry.habits[habit] ? (
+                    <CheckSquare size={26} strokeWidth={2.5} />
+                  ) : (
+                    <Square size={26} strokeWidth={2.5} />
+                  )}
+                </button>
+                <span className={`truncate whitespace-nowrap transition-all duration-300 ${entry.habits && entry.habits[habit] ? 'opacity-80 line-through decoration-slate-400 decoration-2' : ''}`}>
+                  {habit}
+                </span>
+              </label>
+            ))}
+            {userHabits.length === 0 && (
+               <span className="text-slate-400 text-xl font-sans italic my-2">Brak nawyków. Dodaj je w Ustawieniach.</span>
+            )}
+          </div>
+
+          {/* Sekcja 2: Wdzięczność */}
+          <div className="mb-6 border-t-2 border-slate-300/30 pt-2 border-dotted mt-2">
+            <h2 className="uppercase tracking-widest text-2xl font-bold mb-1">WDZIĘCZNOŚĆ:</h2>
+            <div className="flex flex-col">
+              {entry.gratitude.map((text, index) => (
+                <div key={`g-${index}`} className="flex items-start min-h-[40px]">
+                  <span className="mr-2 w-5 text-right flex-shrink-0 pt-[2px]">{index + 1}.</span>
+                  <AutoTextArea
+                    value={text}
+                    onChange={(e) => handleTextChange('gratitude', index, e.target.value)}
+                    onBlur={() => handleTextBlur('gratitude')}
+                    placeholder="_________________"
+                  />
+                </div>
+              ))}
+              <div className="h-[40px] flex items-center mt-1">
+                <button 
+                  onClick={() => addLine('gratitude')}
+                  className="flex items-center bg-transparent border-2 border-slate-700 px-2 rounded-sm hover:bg-slate-100 transition-colors focus:outline-none"
+                  style={{ lineHeight: '1.2' }}
+                >
+                  <PlusSquare size={20} strokeWidth={2.5} className="mr-2" />
+                  <span className="uppercase tracking-widest text-xl font-bold">DODAJ</span>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* Sekcja 3: Nauka Życia */}
+          <div className="mb-6 border-t-2 border-slate-300/30 pt-2 border-dotted">
+            <h2 className="uppercase tracking-widest text-2xl font-bold mb-1">NAUKA ŻYCIA:</h2>
+            <div className="flex flex-col">
+              {entry.learning.map((text, index) => (
+                <div key={`l-${index}`} className="flex items-start min-h-[40px]">
+                  <span className="mr-2 w-5 text-right flex-shrink-0 pt-[2px]">{index + 1}.</span>
+                  <AutoTextArea
+                    value={text}
+                    onChange={(e) => handleTextChange('learning', index, e.target.value)}
+                    onBlur={() => handleTextBlur('learning')}
+                    placeholder="_________________"
+                  />
+                </div>
+              ))}
+               <div className="h-[40px] flex items-center mt-1">
+                <button 
+                  onClick={() => addLine('learning')}
+                  className="flex items-center bg-transparent border-2 border-slate-700 px-2 rounded-sm hover:bg-slate-100 transition-colors focus:outline-none"
+                  style={{ lineHeight: '1.2' }}
+                >
+                  <PlusSquare size={20} strokeWidth={2.5} className="mr-2" />
+                  <span className="uppercase tracking-widest text-xl font-bold">DODAJ</span>
+                </button>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+      
+      {/* Przyciski poza głównym notesem */}
+      <div className="mt-8 flex flex-col sm:flex-row items-center space-y-4 sm:space-y-0 sm:space-x-8">
+        <button 
+          onClick={exportToCSV}
+          className="flex items-center text-slate-500 hover:text-slate-800 transition-colors focus:outline-none px-4 py-2 rounded-md hover:bg-slate-200/50"
+        >
+          <Download size={20} className="mr-2" />
+          <span className="uppercase tracking-wider font-bold text-sm">Pobierz dane (CSV)</span>
+        </button>
+
+        <button 
+          onClick={openSettings}
+          className="flex items-center text-slate-500 hover:text-slate-800 transition-colors focus:outline-none px-4 py-2 rounded-md hover:bg-slate-200/50"
+        >
+          <Settings size={20} className="mr-2" />
+          <span className="uppercase tracking-wider font-bold text-sm">Zarządzaj listami</span>
+        </button>
+      </div>
+
+      {/* Modal Ustawień */}
+      {showSettings && (
+        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-lg shadow-2xl w-full max-w-lg max-h-[90vh] flex flex-col font-sans">
+            
+            <div className="flex justify-between items-center p-4 border-b border-slate-200">
+              <h3 className="text-lg font-bold text-slate-800 flex items-center">
+                <Settings size={20} className="mr-2 text-slate-500" />
+                Zarządzanie listami
+              </h3>
+              <button onClick={() => setShowSettings(false)} className="text-slate-400 hover:text-slate-700 transition-colors focus:outline-none">
+                <X size={24} />
+              </button>
+            </div>
+
+            <div className="p-4 overflow-y-auto flex-1 bg-slate-50 space-y-8">
+              
+              {/* Sekcja: Globalne Nawyki */}
+              <section>
+                <div className="mb-3 border-b border-slate-200 pb-2">
+                  <h4 className="text-md font-bold text-slate-700 uppercase tracking-wide">Globalne Nawyki</h4>
+                  <p className="text-xs text-slate-500 mt-1">
+                    Zmiana nazw nawyków wpłynie na wszystkie dni. Zmiana kolejności pozwoli dostosować układ listy.
+                  </p>
+                </div>
+                
+                <div className="space-y-2">
+                  {editingHabits.map((habit, idx) => (
+                    <div key={`hab-${idx}`} className="flex items-center space-x-2 bg-white p-2 rounded border border-slate-200 shadow-sm">
+                      <input 
+                        type="text" 
+                        value={habit}
+                        onChange={(e) => handleEditHabitChange(idx, e.target.value)}
+                        className="flex-1 bg-transparent border-none px-2 py-1 text-slate-700 focus:outline-none focus:ring-0 font-medium"
+                        placeholder="Nazwa nawyku..."
+                      />
+                      <div className="flex space-x-1 border-l border-slate-200 pl-2">
+                        <button 
+                          onClick={() => handleMoveHabit(idx, 'up')} disabled={idx === 0}
+                          className="p-1 text-slate-400 hover:text-blue-600 disabled:opacity-30 disabled:hover:text-slate-400 transition-colors focus:outline-none" title="W górę"
+                        ><ArrowUp size={18} /></button>
+                        <button 
+                          onClick={() => handleMoveHabit(idx, 'down')} disabled={idx === editingHabits.length - 1}
+                          className="p-1 text-slate-400 hover:text-blue-600 disabled:opacity-30 disabled:hover:text-slate-400 transition-colors focus:outline-none" title="W dół"
+                        ><ArrowDown size={18} /></button>
+                        <button 
+                          onClick={() => handleRemoveHabit(idx)}
+                          className="p-1 text-red-400 hover:text-red-600 transition-colors focus:outline-none" title="Usuń nawyk"
+                        ><Trash2 size={18} /></button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                <button 
+                  onClick={handleAddHabit}
+                  className="mt-3 flex items-center text-blue-600 font-semibold hover:text-blue-700 transition-colors focus:outline-none text-sm"
+                >
+                  <PlusSquare size={16} className="mr-1" />
+                  Dodaj kolejny nawyk
+                </button>
+              </section>
+
+              {/* Sekcja: Zadania na obecny dzień */}
+              <section>
+                <div className="mb-3 border-b border-slate-200 pb-2">
+                  <h4 className="text-md font-bold text-slate-700 uppercase tracking-wide">
+                    Zadania (dla: {formatDisplayDate(currentDate)})
+                  </h4>
+                  <p className="text-xs text-slate-500 mt-1">
+                    Edytuj, usuwaj lub zmieniaj kolejność zadań przypisanych do wybranego dnia w notatniku.
+                  </p>
+                </div>
+                
+                <div className="space-y-2">
+                  {editingTasks.length === 0 && (
+                    <p className="text-sm italic text-slate-400 py-2">Brak zadań dodanych w tym dniu.</p>
+                  )}
+                  {editingTasks.map((task, idx) => (
+                    <div key={`tsk-${idx}`} className="flex items-center space-x-2 bg-white p-2 rounded border border-slate-200 shadow-sm">
+                      <input 
+                        type="text" 
+                        value={task.text}
+                        onChange={(e) => handleEditTaskChangeInSettings(idx, e.target.value)}
+                        className={`flex-1 bg-transparent border-none px-2 py-1 text-slate-700 focus:outline-none focus:ring-0 font-medium ${task.completed ? 'line-through text-slate-400' : ''}`}
+                        placeholder="Nazwa zadania..."
+                      />
+                      <div className="flex space-x-1 border-l border-slate-200 pl-2">
+                        <button 
+                          onClick={() => handleMoveTask(idx, 'up')} disabled={idx === 0}
+                          className="p-1 text-slate-400 hover:text-blue-600 disabled:opacity-30 disabled:hover:text-slate-400 transition-colors focus:outline-none" title="W górę"
+                        ><ArrowUp size={18} /></button>
+                        <button 
+                          onClick={() => handleMoveTask(idx, 'down')} disabled={idx === editingTasks.length - 1}
+                          className="p-1 text-slate-400 hover:text-blue-600 disabled:opacity-30 disabled:hover:text-slate-400 transition-colors focus:outline-none" title="W dół"
+                        ><ArrowDown size={18} /></button>
+                        <button 
+                          onClick={() => handleRemoveTaskInSettings(idx)}
+                          className="p-1 text-red-400 hover:text-red-600 transition-colors focus:outline-none" title="Usuń zadanie"
+                        ><Trash2 size={18} /></button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                <button 
+                  onClick={handleAddTaskInSettings}
+                  className="mt-3 flex items-center text-blue-600 font-semibold hover:text-blue-700 transition-colors focus:outline-none text-sm"
+                >
+                  <PlusSquare size={16} className="mr-1" />
+                  Dodaj kolejne zadanie
+                </button>
+              </section>
+
+            </div>
+
+            <div className="p-4 border-t border-slate-200 bg-white flex justify-end space-x-3 rounded-b-lg">
+              <button 
+                onClick={() => setShowSettings(false)}
+                className="px-4 py-2 font-semibold text-slate-600 hover:bg-slate-100 rounded transition-colors focus:outline-none"
+              >
+                Anuluj
+              </button>
+              <button 
+                onClick={saveSettings}
+                className="px-4 py-2 font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded transition-colors shadow-sm focus:outline-none"
+              >
+                Zapisz zmiany
+              </button>
+            </div>
+            
+          </div>
+        </div>
+      )}
+
+    </div>
+  );
+}
