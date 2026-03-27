@@ -85,6 +85,17 @@ export default function App() {
   const [editingHabits, setEditingHabits] = useState([]); // Tymczasowy stan podczas edycji nawyków
   const [editingTasks, setEditingTasks] = useState([]);   // Tymczasowy stan podczas edycji zadań
 
+  // --- Ustawienie Favicon ---
+  useEffect(() => {
+    const link = document.querySelector("link[rel~='icon']") || document.createElement('link');
+    link.rel = 'icon';
+    link.type = 'image/png';
+    link.href = 'favicon.png';
+    if (!document.querySelector("link[rel~='icon']")) {
+      document.head.appendChild(link);
+    }
+  }, []);
+
   const dateId = formatDateForDB(currentDate);
   const entry = allEntries[dateId] || DEFAULT_ENTRY;
 
